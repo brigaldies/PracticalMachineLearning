@@ -1,0 +1,202 @@
+---
+title: "Machine Learning-Based Qualitative Assessment of Dumbbell Lifts"
+author: "Bertrand Rigaldies"
+date: "March 2016"
+output: html_document
+---
+
+```{r global_options, echo=FALSE, warning=FALSE, message=FALSE, error=TRUE}
+# Load the knitr librabry, and set global options silently.
+require(knitr)
+opts_chunk$set(warning=FALSE, message=FALSE, error=TRUE)
+```
+```{r echo=FALSE, results="hide"}
+# fig_num is used to number figures in the report.
+fig_num <- 1
+```
+```{r libraries, echo=FALSE, results="hide"}
+library(knitr) # To process this R markdown file
+library(plyr) # Data manipulation
+library(dplyr) # More data manipulation
+library(xtable) # Nice table presentation
+library(ggplot2) # Plotting
+library(caret) # Machine learning algorithm
+library(rpart)
+library(gbm)
+library(randomForest)
+```
+
+## Abstract
+
+This paper presents a machine learning/predictive model built with the R `caret` package that assesses the quality of the execution of a dumbbell lift. The paper uses a subset of the data collected and generously shared by the researchers in [1]. The best fit model is a Random Forests-based model, that accomplished an estimated 98% accuracy.
+
+## Data Exploration
+
+### Data Source
+
+The analysis uses a subset of the data collected in [1], and the provided training and testing data sets at available at the following links:
+
+* [training data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+* [testing data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+### Data Collection
+
+The experiment that produced the data as well as the measured variables and collected observations are described in details in [1]. A brief summary is provided below.
+
+* Six male subjects in the mid-twenties, were each equipped with three Inertial Measurement Unit (IMU) sensors: One on the lumbar belt, one of the arm, and another on the forearm.
+* Each subject's dumbbell was also equipped with an IMU.
+* Each subject performed ten repetitions of a right-hand unilateral dumbbell bicep curl, in five different ways according to the following classifications:
+    + __Class A__: The bicep curl is performed correctly.
+    + __Class B__: The bicep curl is not performed correctly by throwing the elbows to the front.
+    + __Class C__: The bicep curl is not performed correctly by lifting the dumbbell halfway.
+    + __Class D__: The bicep curl is not performed correctly by lowering the dumbbell halfway. 
+    + __Class E__: The bicep curl is not performed correctly by throwing the hips to the front.
+* Each IMU provided a _"three-axes acceleration, gyroscope, and magnetometer data at a joint sampling of 45 Hz"_ [1].
+    
+### Data Exploration
+
+#### Data Loading
+
+The training and testing data sets are loaded iN R as shown below (All data and R files are assumed to reside in a single directory.)
+
+```{r data-loading}
+# stringAsFactors=FALSE: Do not let R infer what variable is a factor.
+# The csv data values of empty strings, "NA", and "#DIV/0!" are loaded are "NA" values.
+# Load the original training data set:
+training_orig <- read.csv('pml-training.csv', stringsAsFactors = FALSE, strip.white = TRUE, na.strings = c("", "NA", "#DIV/0!"))
+training_orig$user_name <- as.factor(training_orig$user_name)
+training_orig$classe <- as.factor(training_orig$classe)
+# Load the validation data set:
+validating <- read.csv('pml-testing.csv', stringsAsFactors = FALSE, strip.white = TRUE, na.strings = c("", "NA", "#DIV/0!"))
+validating$user_name <- as.factor(validating$user_name)
+```
+
+The provided training data contains __`r dim(training_orig)[1]`__ observations across __`r dim(training_orig)[2] - 1`__ variables (Not including the outcome "classe" variable). The provided testing, or validation, data contains __`r dim(validating)[1]`__ observations across __`r dim(validating)[2]`__ variables (The validating data set does not include the outcome "classe" variable).
+
+#### Data Variables
+
+The data variables can be grouped into four categories:
+
+1. Observation's ID and subject information: `row_num`, and `user_name`.
+1. Observation's timing and sliding window (See [1] for details) information: `raw_timestamp_part_1`, `raw_timestamp_part_2`, `cvtd_timestamp`, `new_window`, and `num_window`.
+1. IMU's measurements collected from each sensor's accelerometer, gyroscope, and magnetometer, i.e., for the belt's sensor gyroscope (`grep(".*gyros_belt.*", names(training_orig), value = TRUE)`): `gyros_belt_x`, `gyros_belt_y`, and `gyros_belt_z`.
+1. Various derived statistics such as min, max, average, variance, etc., for each sliding window (`new_window == 'yes'`), e.g.: `max_roll_belt`, `avg_pitch_forearm`, `var_accel_dumbbell`, etc.
+
+#### "NA" Analysis and Testing Data Variables
+
+The following observations will guide our features extraction in the next section:
+
+* By design of the data collection setup, the derived statistics are calculated at the end each sliding window (`new_window == 'yes'`). The researchers in [1] selected some of the derived statistics for their model's predictors (See section 5.1 in [1] for details). We will note here that the use of derived statistics calculated over the length of a sliding window to build a predictive model is rather intuitive as the model attempts to assess the quality of a complex person's movement over a period of time.
+* However, because all records in the provided validating (testing) data do not contain any calculated derived statistics (All "NA" across the corresponding variables), we are forced to identify the relevant predictors among the raw measurements from the sensors (Category #3 variables defined above), and consider the prediction as an exercise executed on an observation-by-observation basis.
+    
+## Features Extraction
+
+Based on the observations made in the previous section, as as shown in the R code below, we selected our predictors as being the variables in the training data set that have no NA across all observations.
+
+```{r features-extraction}
+measurement_vars <- grep(".*belt.*|.*arm.*|.*forearm.*|.*dumbbell.*", names(training_orig), value = TRUE)
+measurement_vars_na_count <- data.frame(feature = measurement_vars, non_na_count = sapply(measurement_vars, function(feature) { sum(!is.na(training_orig[,feature]))}))
+measurement_non_na_vars <- as.vector(filter(measurement_vars_na_count, non_na_count == dim(training_orig)[1])[, "feature"])
+measurement_non_na_vars
+training_orig_non_na_vars <- select(training_orig, one_of(append(c("classe"), measurement_non_na_vars)))
+```
+
+## Visualization of Some Predictors
+
+The following two plots help visualizing how a particular measurement (predictor) can intuitively help in classifying the quality of a bicep curl. Figure `r fig_num` plots the belt's gyroscope z measurement, and shows that when the subject throws his hips forward (Classe E), the belt's gyroscope z measurements have noticeably more amplitude than the other classes.
+
+```{r gyros_belt_z}
+qplot(x = training_orig_non_na_vars$classe, 
+      y= training_orig_non_na_vars$gyros_belt_z, 
+      fill=training_orig_non_na_vars$classe, 
+      geom="boxplot", 
+      xlab='Classe', 
+      ylab='Predictor: gyros_belt_z', 
+      main=paste('Fig.', fig_num, ': Class E Predictor gyros_belt_z by Classe')) + guides(fill=guide_legend(title="Classe"))
+```
+```{r echo=FALSE, results="hide"}
+fig_num <- fig_num + 1
+```
+
+Figure `r fig_num` plots the arm's gyroscope y measurement, and shows that when the subject lifts his elbows (Classe B), the arm's gyroscope y measurements have noticeably more amplitude than the other classes. Interestingly, Figure `r fig_num` shows that it is also true for Classe E curls, which is fairly intuitive: Often, throwing the hips forward is also accompanied by a lift of the elbows.
+
+```{r gyros_arm_y}
+qplot(x = training_orig_non_na_vars$classe, 
+      y= training_orig_non_na_vars$gyros_arm_y, 
+      fill=training_orig_non_na_vars$classe, 
+      geom="boxplot",
+      xlab='Classe', 
+      ylab='Predictor: gyros_arm_y', 
+      main=paste('Fig.', fig_num, ': Class B Predictor gyros_arm_y by Classe')) + guides(fill=guide_legend(title="Classe"))
+```
+```{r echo=FALSE, results="hide"}
+fig_num <- fig_num + 1
+```
+
+The two expected predictors plotted in the previous two figures are only part of a large set of measurements, and we expect the model to draw upon many more to learn how to classify a complex movement executed by a human. The next section describes how we built our model.
+
+## Model Building
+
+### Training Data Partitioning for Cross Validation
+
+Since the provided validating data is used as the "held out data" to validate/score our model, our study design consists in partitioning the provided training data into a training and testing data subsets as shown in the R code below. Each tried model is trained with the training data set, and cross-validated with the testing data set.
+
+```{r data-partitioning}
+set.seed(1)
+inTrain <- createDataPartition(training_orig_non_na_vars$classe, p = .7, list = FALSE)
+training <- training_orig_non_na_vars[inTrain,]
+testing <- training_orig_non_na_vars[-inTrain,]
+dim(training)
+dim(testing)
+```
+
+### Pre-Processing: Primary Component Analysis (PCA)
+
+The chosen features, or predictors (See the previous section "Features Extraction") show some correlation, hence a Primary Component Analysis (PCA) is executed, as shown in the R code below:
+
+```{r correlation}
+cor_matrix <- abs(cor(training[,-1]))
+diag(cor_matrix) <- 0
+which(cor_matrix > .9, arr.ind=T)
+set.seed(2)
+preProc <- preProcess(training[, -1], method="pca")
+preProc
+```
+
+The PCA reduced the number of variables from `r preProc$dim[2]` to `r preProc$numComp`. However, the next section shows that models without PCA yields higher accuracy rates than those with PCA.
+
+### Model Building and Testing
+
+Build, test, and compare the various Caret package machine learning methods.
+
+```{r test1}
+n = c(2, 3, 5) 
+s = c("aa", "bb", "cc") 
+b = c(TRUE, FALSE, TRUE) 
+test_df = data.frame(n, s, b)  
+# print(xtable(test_df, auto=TRUE, caption='Test 1'), type="html", comment=F)
+kable(test_df, caption='Test 1', digits = 2)
+```
+
+## Model Validation
+
+This section describes the validation of the model on the provided test data.
+
+## Appendices
+
+### Required R Libraries
+```{r required-libraries, eval=FALSE}
+require(knitr) # To process this R markdown file
+require(plyr) # Data manipulation
+require(dplyr) # More data manipulation
+require(xtable) # Nice table presentation
+require(ggplot2) # Plotting
+require(caret) # Machine learning algorithm
+```
+
+## References
+
+[1] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+[Read more](http://groupware.les.inf.puc-rio.br/har#ixzz43STfOkaC)
+
+[2] ...

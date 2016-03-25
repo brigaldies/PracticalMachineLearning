@@ -1,20 +1,21 @@
 # History files
 .Rhistory
 .Rapp.history
-
 # Session Data files
 .RData
-
 # Example code in package build process
 *-Ex.R
-
 # RStudio files
 .Rproj.user/
-
 # produced vignettes
 vignettes/*.html
 vignettes/*.pdf
-
 # OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
 .httr-oauth
 .Rproj.user
+Project.Rproj
+2013.Velloso.QAR-WLE.pdf
+WearableComputing_weight_lifting_exercises_biceps_curl_variations.csv
+pml-testing-sorted.csv
+pml-testing.csv
+pml-training.csv
