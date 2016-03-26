@@ -16,6 +16,9 @@ library(caret)
 library(rpart)
 library(gbm)
 library(randomForest)
+library(nnet)
+library(foreach)
+library(doSNOW)
 
 # Load the data
 loadData <- function(dataFileName, isTestFile = FALSE) {
@@ -82,66 +85,6 @@ cor_matrix <- abs(cor(df_measurement_non_na_vars))
 diag(cor_matrix) <- 0
 which(cor_matrix > .8, arr.ind=T)
 
-# Training K-folds
-training_adelmo <- select(filter(df, user_name == "adelmo"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_carlitos <- select(filter(df, user_name == "carlitos"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_charles <- select(filter(df, user_name == "charles"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_eurico <- select(filter(df, user_name == "eurico"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_jeremy <- select(filter(df, user_name == "jeremy"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_pedro <- select(filter(df, user_name == "pedro"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_wo_adelmo <- select(filter(df, user_name != "adelmo"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_wo_carlitos <- select(filter(df, user_name != "carlitos"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_wo_charles <- select(filter(df, user_name != "charles"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_wo_eurico <- select(filter(df, user_name != "eurico"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_wo_jeremy <- select(filter(df, user_name != "jeremy"), one_of(append(c("classe"), measurement_non_na_vars)))
-training_wo_pedro <- select(filter(df, user_name != "pedro"), one_of(append(c("classe"), measurement_non_na_vars)))
-
-# K-fold: Adelmo
-summary(training_adelmo$classe)
-set.seed(12345)
-preProc <- preProcess(training_wo_adelmo[, -1], method="pca")
-trainPC <- predict(preProc, training_wo_adelmo[,-1])
-preProc
-
-# Algorithm: Generalized Linear Modeling
-# Method=glm: Not working for either raw or processed data!
-modelFit <- train(training_wo_adelmo$classe ~ ., method="glm", data=trainPC, verbose=TRUE)
-modelFit <- train(classe ~ ., method="glm", data=training_wo_adelmo, verbose=TRUE)
-
-# Algorithm: Predicting with trees
-# Method=rpart: Very inaccurate!
-# With PCA
-modelFit <- train(training_wo_adelmo$classe ~ ., method="rpart", data=trainPC, verbose=TRUE)
-testPC <- predict(preProc, training_adelmo[,-1])
-confusionMatrix(training_adelmo$classe, predict(modelFit, testPC))
-# Without PCA
-modelFit <- train(classe ~ ., method="rpart", data=training_wo_adelmo, verbose=TRUE)
-confusionMatrix(training_adelmo$classe, predict(modelFit, training_adelmo))
-
-# Method=party: Not in the caret package
-modelFit <- train(training_wo_adelmo$classe ~ ., method="party", data=trainPC, verbose=TRUE)
-testPC <- predict(preProc, training_adelmo[,-1])
-confusionMatrix(training_adelmo$classe, predict(modelFit, testPC))
-
-# Algorithm: Bagging
-# Method=bagEarth: Does not converge
-# Method=treebag: Execution not finishing within minutes
-modelFit <- train(training_wo_adelmo$classe ~ ., method="treebag", data=trainPC, verbose=TRUE)
-testPC <- predict(preProc, training_adelmo[,-1])
-confusionMatrix(training_adelmo$classe, predict(modelFit, testPC))
-
-# Algorithm: Boosting
-# Method=gbm: Execution not finishing within minutes
-set.seed(12345)
-modelFit <- train(training_wo_adelmo$classe ~ ., method="gbm", data=trainPC, verbose=TRUE)
-testPC <- predict(preProc, training_adelmo[,-1])
-confusionMatrix(training_adelmo$classe, predict(modelFit, testPC))
-
-# Algorithm: Random Forests
-modelFit <- train(training_wo_adelmo$classe ~ ., method="rf", data=trainPC, verbose=TRUE)
-testPC <- predict(preProc, training_adelmo[,-1])
-confusionMatrix(training_adelmo$classe, predict(modelFit, testPC))
-
 # ------------------------------------------------------------------------------
 # Function: trainWithMethod
 # 
@@ -151,6 +94,7 @@ trainWithMethod <- function(methodName,
                             seedNumber,                    
                             trainingData,                             
                             testingData,
+                            trControl,
                             doPCA = TRUE) {
     set.seed(seedNumber)
     modelFitPca <- NULL
@@ -165,20 +109,20 @@ trainWithMethod <- function(methodName,
         execTimePca <- system.time({       
             try(
                 if (methodName == 'gbm') {
-                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC, verbose=FALSE)
+                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC, trControl=trControl, verbose=FALSE)
                 } else {
-                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC)
+                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC, trControl=trControl)
                 }
             )
         })
-        message(paste("Training with method", methodName, "with PCA completed in", round(execTimePca["user.self"], 2), "secs"))
+        message(paste("Training with method", methodName, "with PCA completed in", round(execTimePca["elapsed"], 2), "secs"))
         
         if (is.null(modelFitPca)) { 
             message(paste("Training with method", methodName, "with PCA failed."))
         } else {
             testPC <- predict(preProc, testingData[,-1])
             cMatrixPca <- confusionMatrix(testingData$classe, predict(modelFitPca, testPC))
-            message(paste("Training with method", methodName, "with PCA reached an accuracy of", cMatrixPca$overall["Accuracy"]))
+            message(paste("Testing with method", methodName, "with PCA reached an accuracy of", round(cMatrixPca$overall["Accuracy"], 2)))
         }
     } else {
         message(paste("Training with method", methodName, "with PCA skipped."))
@@ -192,36 +136,48 @@ trainWithMethod <- function(methodName,
     execTime <- system.time({
         try(
             if (methodName == 'gbm') {
-                modelFit <- train(classe ~ ., method=methodName, data=trainingData, verbose=FALSE)
+                modelFit <- train(classe ~ ., method=methodName, data=trainingData, trControl=trControl, verbose=FALSE)
             } else {
-                modelFit <- train(classe ~ ., method=methodName, data=trainingData)
+                modelFit <- train(classe ~ ., method=methodName, data=trainingData, trControl=trControl)
             }
         )
     })
-    message(paste("Training with method", methodName, "completed in", round(execTime["user.self"], 2), "secs"))
+    message(paste("Training with method", methodName, "completed in", round(execTime["elapsed"], 2), "secs"))
     
     if (is.null(modelFit)) { 
         message(paste("Training with method", methodName, "failed."))
     } else {    
         cMatrix <- confusionMatrix(testingData$classe, predict(modelFit, testingData))
-        message(paste("Training with method", methodName, "reached an accuracy of", cMatrix$overall["Accuracy"]))
+        message(paste("Testing with method", methodName, "reached an accuracy of", round(cMatrix$overall["Accuracy"], 2)))
     }
     
     # Return the results
-    result <- data.frame(
+    result <- list(
         method=methodName,        
-        execTime = execTime["user.self"],
-        accuracy = ifelse(is.null(modelFit), -1, cMatrix$overall["Accuracy"]),        
-        execTimePCa = ifelse(is.null(execTimePca), -1, execTimePca["user.self"]),
-        accuracyPca = ifelse(is.null(modelFitPca), -1, cMatrixPca$overall["Accuracy"]))
-    rownames(result) <- methodName
+        modelFit = modelFit,
+        execTime = execTime["elapsed"],
+        cMatrix = cMatrix,
+        modelFitPca = modelFitPca,
+        execTimePca = execTimePca["elapsed"],
+        cMatrixPca = cMatrixPca)    
     return(result)
 }
 
 # ------------------------------------------------------------------------------
+# Configure parallel processing
+# ------------------------------------------------------------------------------
+detectCores()
+cluster <- makeCluster(detectCores()/2)
+registerDoSNOW(cluster)
+clusterExport(cluster, list=c("training", "testing", "trainWithMethod", "preProcess", "train")) 
+methodsML <- c("glm", "rpart", "gbm")
+workerFunc <- function(method) { trainWithMethod(method, 1, training, testing) }
+system.time(result <- parLapply(cluster, methodsML, workerFunc))
+stopCluster(cluster)
+
+# ------------------------------------------------------------------------------
 # Model Building & Testing
 # ------------------------------------------------------------------------------
-results <- data.frame(model=c(), pca=c(), nonpca=c())
 
 # ------------------------------------------------------------------------------
 # With data partitioning
@@ -234,10 +190,10 @@ testing <- df_measurement_non_na_vars[-inTrain,]
 # ------------------------------------------------------------------------------
 # With PCA
 # ------------------------------------------------------------------------------
-# set.seed(2)
-#preProc <- preProcess(training[, -1], method="pca")
-#trainPC <- predict(preProc, training[,-1])
-#preProc
+set.seed(2)
+preProc <- preProcess(training[, -1], method="pca")
+trainPC <- predict(preProc, training[,-1])
+preProc
 
 methodsToTry <- c("glm", "rpart", "gbm", "rf")
 results = data.frame(method=c(), execTime=c(), accuracy=c(), execTimePca=c(), accuracyPca=c())
@@ -245,11 +201,29 @@ for (i in 1:length(methodsToTry)) {
     results <- rbind(results, trainWithMethod(methodsToTry[i], i, training, testing))
 }
 
-results
-results <- rbind(results, trainWithMethod("glm", 1, training, testing))
-results <- rbind(results, trainWithMethod("rpart", 2, training, testing))
-results <- rbind(results, trainWithMethod("gbm", 3, training, testing))
-results <- rbind(results, trainWithMethod("rf", 4, training, testing, doPCA = FALSE))
+date()
+trControl <- trainControl(number=5, returnData = FALSE)
+execTime <- system.time({
+    # modelFit.glm <- trainWithMethod("glm", 1, training, testing, trControl)
+    modelFit.rpart <- trainWithMethod("rpart", 2, training, testing, trControl)
+    modelFit.gbm <- trainWithMethod("gbm", 3, training, testing, trControl)
+    #modelFit.rf <- trainWithMethod("rf", 4, training, testing, trControl)
+    #modelFit.nnet <- trainWithMethod("nnet", 5, training, testing, trControl)
+})
+print(execTime)
+
+results <- data.frame(
+    method=c('rpart', 'gbm'),
+    execTime=c(modelFit.rpart$execTime, modelFit.gbm$execTime),
+    accuracy=c(modelFit.rpart$cMatrix$overall["Accuracy"], modelFit.gbm$cMatrix$overall["Accuracy"]), 
+    execTimePca=c(modelFit.rpart$execTimePca, modelFit.gbm$execTimePca),
+    accuracyPca=c(modelFit.rpart$cMatrixPca$overall["Accuracy"], modelFit.gbm$cMatrixPca$overall["Accuracy"])
+    )
+
+results = foreach(methodName = methodsML) %dopar% {
+    list(method=methodName, modelFit=train(classe ~ ., method=methodName, data=training))
+}
+
 
 
 # As of 3-22-2016:
@@ -296,7 +270,7 @@ results <- rbind(results, data.frame(
 # ------------------------------------------------------------------------------
 # Tree: rpart - Accuracy : 0.4117
 # ------------------------------------------------------------------------------
-set.seed(2)
+set.seed(3)
 modelFitPca <- NULL
 cMatrixPca <- NULL
 modelFit <- NULL
@@ -392,10 +366,13 @@ confusionMatrix(testing$classe, predict(modelFit, testing))
 
 # Boosting (~20 mins model building)
 # Method=gbm: 0.9295
-date()
-modelFit <- train(classe ~ ., method="gbm", data=training, verbose=FALSE)
-date()
-confusionMatrix(testing$classe, predict(modelFit, testing))
+set.seed(3)
+modelFit.gbm <- NULL
+execTime <- system.time({
+    modelFit.gbm <- train(classe ~ ., method="gbm", data=training, verbose=FALSE)
+})
+execTime
+confusionMatrix(testing$classe, predict(modelFit.gbm, testing))
 
 # Random Forests (~40 mins hour model building)
 # Method=rf: 0.9884 *** BEST ***
@@ -406,7 +383,7 @@ execTime <- system.time({
 })
 print(execTime)
 summary(modelFit.rf)
-print(modelFit.rf, digits = 3)
+print(modelFit.rf, digits = 4)
 modelFit.rf$finalModel
 plot(modelFit.rf)
 testingPred <- predict(modelFit.rf, testing)

@@ -1,5 +1,5 @@
 ---
-title: "Machine Learning-Based Qualitative Assessment of Dumbbell Lifts"
+title: "Machine Learning-Based Qualitative Assessment of a Dumbbell Bicep Curl"
 author: "Bertrand Rigaldies"
 date: "March 2016"
 output: html_document
@@ -10,9 +10,10 @@ output: html_document
 require(knitr)
 opts_chunk$set(warning=FALSE, message=FALSE, error=TRUE)
 ```
-```{r echo=FALSE, results="hide"}
+```{r fig_and_table_nums, echo=FALSE, results="hide"}
 # fig_num is used to number figures in the report.
 fig_num <- 1
+table_num <- 1
 ```
 ```{r libraries, echo=FALSE, results="hide"}
 library(knitr) # To process this R markdown file
@@ -21,14 +22,17 @@ library(dplyr) # More data manipulation
 library(xtable) # Nice table presentation
 library(ggplot2) # Plotting
 library(caret) # Machine learning algorithm
-library(rpart)
-library(gbm)
-library(randomForest)
+library(rpart) # Machine learning algorithm
+library(gbm) # Machine learning algorithm
+library(nnet) # Machine learning algorithm
+library(randomForest) # Machine learning algorithm
+library(foreach) # "For each"" construct
+library(doSNOW) # Parallel processing
 ```
 
 ## Abstract
 
-This paper presents a machine learning/predictive model built with the R `caret` package that assesses the quality of the execution of a dumbbell lift. The paper uses a subset of the data collected and generously shared by the researchers in [1]. The best fit model is a Random Forests-based model, that accomplished an estimated 98% accuracy.
+This paper presents a machine learning/predictive model built with the R `caret` package that assesses the quality of the execution of a dumbbell bicep curl. The paper uses a subset of the data collected and generously shared by the researchers in [1]. The best fit model is a Random Forests-based model, that accomplished an estimated 0.99 accuracy, and a 0.45% estimated out-of-sample error rate.
 
 ## Data Exploration
 
@@ -167,31 +171,177 @@ The PCA reduced the number of variables from `r preProc$dim[2]` to `r preProc$nu
 
 ### Model Building and Testing
 
-Build, test, and compare the various Caret package machine learning methods.
+We tested the following machine learning algorithms:
 
-```{r test1}
-n = c(2, 3, 5) 
-s = c("aa", "bb", "cc") 
-b = c(TRUE, FALSE, TRUE) 
-test_df = data.frame(n, s, b)  
-# print(xtable(test_df, auto=TRUE, caption='Test 1'), type="html", comment=F)
-kable(test_df, caption='Test 1', digits = 2)
+1. [_glm_](http://topepo.github.io/caret/Generalized_Linear_Model.html): Generalized Linear Model.
+1. [_rpart_](http://topepo.github.io/caret/Tree_Based_Model.html): CART Tree-Based Model.
+1. [_gbm_](http://topepo.github.io/caret/Boosting.html): Stochastic Gradient Boosting Model.
+1. [_nnet_](http://topepo.github.io/caret/Neural_Network.html): Neural Network Model.
+1. [_rf_](http://topepo.github.io/caret/Random_Forest.html): Random Forest Model.
+
+In the R code below, each machine learning algorithm is trained and cross-validated with the same `training` and `testing` data sets respectively (See the R code for trainWithMethod helper function in Appendix B). As of trade-off between model's training time and accurary, we used a train control "number" of bootstrap-based resampling iterations of 5 (The default is 25, consult ?trainControl for details.) The train control parameter `returndData` is to FALSE to save on RAM usage.
+
+The care package is [parallel processing framework](http://topepo.github.io/caret/parallel.html)-aware, and the [doSNOW](https://cran.r-project.org/web/packages/doSNOW/index.html) package is used to provide the parallel processing framework with half of the available cores as a trade-off between speed and RAM usage.
+
+Note that the _glm_ algorithm did not work with this data, and therefore is not included in Table 1.
+
+```{r trainWithMethod, echo=FALSE}
+trainWithMethod <- function(methodName, 
+                            seedNumber,                    
+                            trainingData,                             
+                            testingData,
+                            trControl,
+                            doPCA = TRUE) {
+    set.seed(seedNumber)
+    modelFitPca <- NULL
+    cMatrixPca <- NULL
+    execTimePca <- NULL
+    # ---------- With PCA ----------
+    if (doPCA == TRUE) {
+        preProc <- preProcess(trainingData[, -1], method="pca")
+        trainPC <- predict(preProc, trainingData[,-1])    
+        
+        message(paste("Training with method", methodName, "with PCA ..."))
+        execTimePca <- system.time({       
+            try(
+                if (methodName == 'gbm') {
+                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC, trControl=trControl, verbose=FALSE)
+                } else {
+                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC, trControl=trControl)
+                }
+            )
+        })
+        message(paste("Training with method", methodName, "with PCA completed in", round(execTimePca["elapsed"], 2), "secs"))
+        
+        if (is.null(modelFitPca)) { 
+            message(paste("Training with method", methodName, "with PCA failed."))
+        } else {
+            testPC <- predict(preProc, testingData[,-1])
+            cMatrixPca <- confusionMatrix(testingData$classe, predict(modelFitPca, testPC))
+            message(paste("Testing with method", methodName, "with PCA reached an accuracy of", round(cMatrixPca$overall["Accuracy"], 2)))
+        }
+    } else {
+        message(paste("Training with method", methodName, "with PCA skipped."))
+    }
+    # ---------- Without PCA ----------
+    set.seed(seedNumber)
+    modelFit <- NULL
+    cMatrix <- NULL
+    execTime <- NULL
+    message(paste("Training with method", methodName, "..."))
+    execTime <- system.time({
+        try(
+            if (methodName == 'gbm') {
+                modelFit <- train(classe ~ ., method=methodName, data=trainingData, trControl=trControl, verbose=FALSE)
+            } else {
+                modelFit <- train(classe ~ ., method=methodName, data=trainingData, trControl=trControl)
+            }
+        )
+    })
+    message(paste("Training with method", methodName, "completed in", round(execTime["elapsed"], 2), "secs"))
+    
+    if (is.null(modelFit)) { 
+        message(paste("Training with method", methodName, "failed."))
+    } else {    
+        cMatrix <- confusionMatrix(testingData$classe, predict(modelFit, testingData))
+        message(paste("Testing with method", methodName, "reached an accuracy of", round(cMatrix$overall["Accuracy"], 2)))
+    }
+    
+    # Return the results
+    result <- list(
+        method=methodName,        
+        modelFit = modelFit,
+        execTime = execTime["elapsed"],
+        cMatrix = cMatrix,
+        modelFitPca = modelFitPca,
+        execTimePca = execTimePca["elapsed"],
+        cMatrixPca = cMatrixPca)    
+    return(result)
+}
+```
+```{r parallel-processing-setup}
+# Setup the doSNOW parallel processing "backend"
+cluster <- makeCluster(detectCores()/2)
+registerDoSNOW(cluster)
+```
+```{r train_and_cross_validate, cache=TRUE}
+trControl <- trainControl(number=5, returnData = FALSE)
+execTime <- system.time({    
+    modelFit.rpart <- trainWithMethod("rpart", 2, training, testing, trControl)
+    modelFit.gbm <- trainWithMethod("gbm", 3, training, testing, trControl)
+    modelFit.nnet <- trainWithMethod("nnet", 5, training, testing, trControl)
+    modelFit.rf <- trainWithMethod("rf", 4, training, testing, trControl)    
+})
+print(execTime)
+```
+
+Table `r table_num` below provides the training and cross-validation results for the selected machine learning algorithms.
+
+```{r training-results}
+results <- data.frame(
+    method=c('rpart', 'gbm', 'nnet', 'rf'),
+    execTime=c(modelFit.rpart$execTime, 
+               modelFit.gbm$execTime,
+               modelFit.nnet$execTime,
+               modelFit.rf$execTime),
+    accuracy=c(modelFit.rpart$cMatrix$overall["Accuracy"], 
+               modelFit.gbm$cMatrix$overall["Accuracy"],
+               modelFit.nnet$cMatrix$overall["Accuracy"],
+               modelFit.rf$cMatrix$overall["Accuracy"]), 
+    execTimePca=c(modelFit.rpart$execTimePca, 
+                  modelFit.gbm$execTimePca,
+                  modelFit.nnet$execTimePca,
+                  modelFit.rf$execTimePca),
+    accuracyPca=c(modelFit.rpart$cMatrixPca$overall["Accuracy"], 
+                  modelFit.gbm$cMatrixPca$overall["Accuracy"],
+                  modelFit.nnet$cMatrixPca$overall["Accuracy"],
+                  modelFit.rf$cMatrixPca$overall["Accuracy"]))
+kable(arrange(results, desc(accuracy)), 
+      caption=paste0('Table ', table_num, " : Selected Machine Learning Models Training and Cross-Validating Results (Sorted by 'accuracy' descending)"), 
+      digits = 4)
+```
+```{r echo=FALSE, results="hide"}
+table_num <- table_num + 1
 ```
 
 ## Model Validation
 
-This section describes the validation of the model on the provided test data.
+### Our Best Model
 
-## Appendices
+Our best model was built with the _rf_ algorithm. The model's information  is summarized below:
 
-### Required R Libraries
-```{r required-libraries, eval=FALSE}
-require(knitr) # To process this R markdown file
-require(plyr) # Data manipulation
-require(dplyr) # More data manipulation
-require(xtable) # Nice table presentation
-require(ggplot2) # Plotting
-require(caret) # Machine learning algorithm
+```{r best-model}
+# Our best model with 'rf':
+modelFit <- modelFit.rf$modelFit
+summary(modelFit)
+print(modelFit, digits = 4)
+modelFit$finalModel
+```
+
+### Estimated Out-of-Sample Error Rate
+
+The R code below calculates our model's estimated out-of-sample error rate:
+
+```{r estimated-out-of-sample-error-rate}
+testingPred <- predict(modelFit, testing)
+modelFit.cm <- confusionMatrix(testing$classe, testingPred)
+modelFit.cm
+# out of sample error estimate
+testingPredRate <- sum(testingPred == testing$classe)/length(testingPred)
+```
+
+The estimated out-of-sample error rate is `r sprintf("%0.4f%%", round((1 - testingPredRate) * 100, 4))`.
+
+### Final Model Test
+
+Finally, our best model is tested against the provided test data as shown in the R code below:
+
+```{r final-test}
+predict(modelFit, validating)
+```
+
+```{r closing, echo=FALSE, results="hide"}
+stopCluster(cluster)
 ```
 
 ## References
@@ -199,4 +349,98 @@ require(caret) # Machine learning algorithm
 [1] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
 [Read more](http://groupware.les.inf.puc-rio.br/har#ixzz43STfOkaC)
 
-[2] ...
+## Appendices
+
+### Appendix A: Required R Libraries
+```{r required-libraries, eval=FALSE}
+library(knitr) # To process this R markdown file
+library(plyr) # Data manipulation
+library(dplyr) # More data manipulation
+library(xtable) # Nice table presentation
+library(ggplot2) # Plotting
+library(caret) # Machine learning algorithm
+library(rpart) # Machine learning algorithm
+library(gbm) # Machine learning algorithm
+library(nnet) # Machine learning algorithm
+library(randomForest) # Machine learning algorithm
+library(foreach) # "For each"" construct
+library(doSNOW) # Parallel processing
+```
+
+### Appendix B: R trainWithMethod
+```{r appendix-b, eval=FALSE}
+trainWithMethod <- function(methodName, 
+                            seedNumber,                    
+                            trainingData,                             
+                            testingData,
+                            trControl,
+                            doPCA = TRUE) {
+    set.seed(seedNumber)
+    modelFitPca <- NULL
+    cMatrixPca <- NULL
+    execTimePca <- NULL
+    # ---------- With PCA ----------
+    if (doPCA == TRUE) {
+        preProc <- preProcess(trainingData[, -1], method="pca")
+        trainPC <- predict(preProc, trainingData[,-1])    
+        
+        message(paste("Training with method", methodName, "with PCA ..."))
+        execTimePca <- system.time({       
+            try(
+                if (methodName == 'gbm') {
+                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC, trControl=trControl, verbose=FALSE)
+                } else {
+                    modelFitPca <- train(trainingData$classe ~ ., method=methodName, data=trainPC, trControl=trControl)
+                }
+            )
+        })
+        message(paste("Training with method", methodName, "with PCA completed in", round(execTimePca["elapsed"], 2), "secs"))
+        
+        if (is.null(modelFitPca)) { 
+            message(paste("Training with method", methodName, "with PCA failed."))
+        } else {
+            testPC <- predict(preProc, testingData[,-1])
+            cMatrixPca <- confusionMatrix(testingData$classe, predict(modelFitPca, testPC))
+            message(paste("Testing with method", methodName, "with PCA reached an accuracy of", round(cMatrixPca$overall["Accuracy"], 2)))
+        }
+    } else {
+        message(paste("Training with method", methodName, "with PCA skipped."))
+    }
+    # ---------- Without PCA ----------
+    set.seed(seedNumber)
+    modelFit <- NULL
+    cMatrix <- NULL
+    execTime <- NULL
+    message(paste("Training with method", methodName, "..."))
+    execTime <- system.time({
+        try(
+            if (methodName == 'gbm') {
+                modelFit <- train(classe ~ ., method=methodName, data=trainingData, trControl=trControl, verbose=FALSE)
+            } else {
+                modelFit <- train(classe ~ ., method=methodName, data=trainingData, trControl=trControl)
+            }
+        )
+    })
+    message(paste("Training with method", methodName, "completed in", round(execTime["elapsed"], 2), "secs"))
+    
+    if (is.null(modelFit)) { 
+        message(paste("Training with method", methodName, "failed."))
+    } else {    
+        cMatrix <- confusionMatrix(testingData$classe, predict(modelFit, testingData))
+        message(paste("Testing with method", methodName, "reached an accuracy of", round(cMatrix$overall["Accuracy"], 2)))
+    }
+    
+    # Return the results
+    result <- list(
+        method=methodName,        
+        modelFit = modelFit,
+        execTime = execTime["elapsed"],
+        cMatrix = cMatrix,
+        modelFitPca = modelFitPca,
+        execTimePca = execTimePca["elapsed"],
+        cMatrixPca = cMatrixPca)    
+    return(result)
+}
+```
+
+_End of document_
